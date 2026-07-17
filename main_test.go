@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestPushMessage(t *testing.T) {
@@ -58,7 +59,7 @@ func TestPushMessage(t *testing.T) {
 		}
 
 		if testCase.checkQ {
-			q, exists := qStor[testCase.qName]
+			q, exists := qStor.storage[testCase.qName]
 			if !exists {
 				t.Errorf(
 					"#%d %s: expected queue with name %q to exist",
@@ -103,10 +104,10 @@ func TestPopMessage(t *testing.T) {
 	{
 		prefix := "non-existent queue"
 		qName := "non-existent"
-		delete(qStor, qName) // for the purity of the test
+		delete(qStor.storage, qName) // for the purity of the test
 
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", popEndpoint(qName), nil)
+		req := httptest.NewRequest("GET", popEndpoint(qName, ""), nil)
 
 		mux.ServeHTTP(rec, req)
 
@@ -123,14 +124,15 @@ func TestPopMessage(t *testing.T) {
 	{
 		prefix := "empty queue"
 		qName := "empty"
-		emptyQ := &queue{head: nil, tail: nil}
-		qStor[qName] = emptyQ
+		// emptyQ := &Queue{head: nil, tail: nil}
+		emptyQ := NewQueue("")
+		qStor.storage[qName] = emptyQ
 		defer func() {
-			delete(qStor, qName)
+			delete(qStor.storage, qName)
 		}()
 
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", popEndpoint(qName), nil)
+		req := httptest.NewRequest("GET", popEndpoint(qName, ""), nil)
 
 		mux.ServeHTTP(rec, req)
 
@@ -147,15 +149,17 @@ func TestPopMessage(t *testing.T) {
 	{
 		prefix := "one element queue"
 		qName := "1el"
-		qEl := &queueElement{value: "one el q val", next: nil}
-		q := &queue{head: qEl, tail: qEl}
-		qStor[qName] = q
+		val := "one el q val"
+		// qEl := &queueElement{value: "one el q val", next: nil}
+		// q := &Queue{head: qEl, tail: qEl}
+		q := NewQueue(val)
+		qStor.storage[qName] = q
 		defer func() {
-			delete(qStor, qName)
+			delete(qStor.storage, qName)
 		}()
 
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", popEndpoint(qName), nil)
+		req := httptest.NewRequest("GET", popEndpoint(qName, ""), nil)
 
 		mux.ServeHTTP(rec, req)
 
@@ -167,12 +171,12 @@ func TestPopMessage(t *testing.T) {
 			)
 		}
 
-		if rec.Body.String() != qEl.value {
+		if rec.Body.String() != val {
 			t.Fatalf(
 				"%s: incorrect output body: got: %q, expected: %q",
 				prefix,
 				rec.Body.String(),
-				qEl.value,
+				val,
 			)
 		}
 
@@ -188,16 +192,20 @@ func TestPopMessage(t *testing.T) {
 	{
 		prefix := "two element queue"
 		qName := "2el"
-		qEl2 := &queueElement{value: "two el q val 2", next: nil}
-		qEl1 := &queueElement{value: "two el q val 1", next: qEl2}
-		q := &queue{head: qEl1, tail: qEl2}
-		qStor[qName] = q
+		val1 := "two el q val 1"
+		val2 := "two el q val 2"
+		// qEl2 := &queueElement{value: "two el q val 2", next: nil}
+		// qEl1 := &queueElement{value: "two el q val 1", next: qEl2}
+		// q := &Queue{head: qEl1, tail: qEl2}
+		q := NewQueue(val1)
+		q.Push(val2)
+		qStor.storage[qName] = q
 		defer func() {
-			delete(qStor, qName)
+			delete(qStor.storage, qName)
 		}()
 
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", popEndpoint(qName), nil)
+		req := httptest.NewRequest("GET", popEndpoint(qName, ""), nil)
 
 		mux.ServeHTTP(rec, req)
 
@@ -209,20 +217,191 @@ func TestPopMessage(t *testing.T) {
 			)
 		}
 
-		if rec.Body.String() != qEl1.value {
+		if rec.Body.String() != val1 {
 			t.Fatalf(
 				"%s: incorrect output body: got: %q, expected: %q",
 				prefix,
 				rec.Body.String(),
-				qEl1.value,
+				val1,
 			)
 		}
 
-		if q.head != qEl2 || q.tail != qEl2 {
+		if q.head.value != val2 || q.tail.value != val2 {
 			t.Fatalf(
 				"%s: expected element to be removed and one left",
 				prefix,
 			)
+		}
+	}
+
+	// test non-numeric timeout
+	{
+		prefix := "non-numeric timeout"
+		qName := "empty"
+		timeout := "notanum"
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", popEndpoint(qName, timeout), nil)
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Result().StatusCode != http.StatusBadRequest {
+			t.Fatalf(
+				"%s: incorrect status code: got: %d, expected: 400",
+				prefix,
+				rec.Result().StatusCode,
+			)
+		}
+	}
+
+	// test negative timeout
+	{
+		prefix := "negative timeout"
+		qName := "empty"
+		timeout := "-3"
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", popEndpoint(qName, timeout), nil)
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Result().StatusCode != http.StatusBadRequest {
+			t.Fatalf(
+				"%s: incorrect status code: got: %d, expected: 400",
+				prefix,
+				rec.Result().StatusCode,
+			)
+		}
+	}
+
+	// test 0 timeout and empty queue
+	// 0 timeout acts like no timeout provided
+	{
+		prefix := "0 timeout"
+		qName := "empty"
+		timeout := "0"
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", popEndpoint(qName, timeout), nil)
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Result().StatusCode != http.StatusNotFound {
+			t.Fatalf(
+				"%s: incorrect status code: got: %d, expected: 404",
+				prefix,
+				rec.Result().StatusCode,
+			)
+		}
+	}
+
+	// test req with timeout to an empty queue
+	{
+		prefix := "req with timeout to an empty queue"
+		qName := "empty"
+		timeout := "1"
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", popEndpoint(qName, timeout), nil)
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Result().StatusCode != http.StatusNotFound {
+			t.Fatalf(
+				"%s: incorrect status code: got: %d, expected: 404",
+				prefix,
+				rec.Result().StatusCode,
+			)
+		}
+	}
+
+	// test req with timeout to non-empty queue
+	{
+		prefix := "req with timeout to an empty queue"
+		qName := "non-empty"
+		timeout := "1"
+		expectedVal := "one el q val"
+		// qEl := &queueElement{value: expectedVal, next: nil}
+		// q := &Queue{head: qEl, tail: qEl}
+		q := NewQueue(expectedVal)
+		qStor.storage[qName] = q
+		defer func() {
+			delete(qStor.storage, qName)
+		}()
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", popEndpoint(qName, timeout), nil)
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Result().StatusCode != http.StatusOK {
+			t.Fatalf(
+				"%s: incorrect status code: got: %d, expected: 200",
+				prefix,
+				rec.Result().StatusCode,
+			)
+		}
+
+		if rec.Body.String() != expectedVal {
+			t.Fatalf(
+				"%s: incorrect output body: got: %q, expected: %q",
+				prefix,
+				rec.Body.String(),
+				expectedVal,
+			)
+		}
+	}
+
+	// test req with timeout to an empty queue that receives val in the middle of awaiting
+	{
+		prefix := "req with timeout to an empty queue that receives val in the middle of awaiting"
+		qName := "empty-but-potentially-not"
+		timeout := "2"
+		// q := &Queue{}
+		q := NewQueue("")
+		qStor.storage[qName] = q
+		defer func() {
+			delete(qStor.storage, qName)
+		}()
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", popEndpoint(qName, timeout), nil)
+
+		signalDone := make(chan struct{})
+
+		go func() {
+			mux.ServeHTTP(rec, req)
+
+			signalDone <- struct{}{}
+		}()
+
+		time.Sleep(2 * time.Second)
+		expectedVal := "val"
+		q.Push(expectedVal)
+
+		select {
+		case <-time.After(1 * time.Second):
+			t.Fatalf(
+				"%s: time exceeded, but res hasn't been received",
+				prefix,
+			)
+		case <-signalDone:
+			if rec.Result().StatusCode != http.StatusOK {
+				t.Fatalf(
+					"%s: incorrect status code: got: %d, expected: 200",
+					prefix,
+					rec.Result().StatusCode,
+				)
+			}
+
+			if rec.Body.String() != expectedVal {
+				t.Fatalf(
+					"%s: incorrect output body: got: %q, expected: %q",
+					prefix,
+					rec.Body.String(),
+					expectedVal,
+				)
+			}
 		}
 	}
 }
@@ -355,6 +534,11 @@ func pushEndpoint(qName, v string) string {
 	return endpoint
 }
 
-func popEndpoint(qName string) string {
-	return "/" + qName
+func popEndpoint(qName, timeout string) string {
+	endpoint := "/" + qName
+	if timeout != "" {
+		endpoint += "?timeout=" + timeout
+	}
+
+	return endpoint
 }
